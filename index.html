@@ -96,9 +96,13 @@ button{cursor:pointer}
 .rollwrap{position:relative;border-radius:14px;overflow:hidden;border:1px solid var(--line);touch-action:pan-y}
 canvas#roll{display:block;width:100%;height:260px;cursor:grab}
 @media(min-width:760px){canvas#roll{height:320px}}
-.count{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;
-  font-size:120px;font-weight:900;color:var(--accent);text-shadow:0 2px 0 var(--surface)}
-.count.pop{animation:pop .35s ease-out}
+.count{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+.countbox{position:relative;width:170px;height:170px;display:flex;align-items:center;justify-content:center}
+.countbox svg{position:absolute;inset:0;width:100%;height:100%;transform:rotate(-90deg)}
+.countbox .cbg{fill:var(--surface);fill-opacity:.88;stroke:var(--line);stroke-width:6}
+.countbox .cfg{fill:none;stroke:var(--accent);stroke-width:6;stroke-linecap:round;stroke-dasharray:276.46;stroke-dashoffset:276.46}
+#cnum{position:relative;font-size:96px;font-weight:900;color:var(--accent);line-height:1}
+.count.pop #cnum{animation:pop .35s ease-out}
 @keyframes pop{from{transform:scale(1.5);opacity:.3}to{transform:scale(1);opacity:1}}
 .hint{font-size:12px;color:var(--muted);margin:6px 2px 0}
 
@@ -167,7 +171,7 @@ summary{cursor:pointer;font-weight:700;font-size:14px;color:var(--muted)}
 .strings button[aria-pressed="true"]{border-color:var(--accent);background:var(--accent);color:var(--accent-ink)}
 @media (prefers-reduced-motion: reduce){
   .dial .needle,.meter .ndl{transition:none}
-  .count.pop{animation:none}
+  .count.pop #cnum{animation:none}
 }
 </style>
 </head>
@@ -220,7 +224,7 @@ summary{cursor:pointer;font-weight:700;font-size:14px;color:var(--muted)}
       <div class="beats" id="beats" aria-hidden="true"></div>
       <div class="rollwrap">
         <canvas id="roll" aria-label="音の流れと演奏の音程"></canvas>
-        <div class="count hidden" id="count"></div>
+        <div class="count hidden" id="count"><div class="countbox"><svg viewBox="0 0 100 100" aria-hidden="true"><circle class="cbg" cx="50" cy="50" r="44"/><circle class="cfg" id="cring" cx="50" cy="50" r="44"/></svg><span id="cnum"></span></div></div>
       </div>
       <p class="hint" id="rollhint">横にドラッグすると開始位置を選べます。縦の線が今の位置です。</p>
       <div class="legend"><span><i style="background:var(--hit)"></i>合っている（±25セント）</span><span><i style="background:var(--near)"></i>少しずれ（±50）</span><span><i style="background:var(--miss)"></i>ずれ</span></div>
@@ -281,7 +285,7 @@ summary{cursor:pointer;font-weight:700;font-size:14px;color:var(--muted)}
           </div>
           <div class="field">
             <label for="sens">マイク感度</label>
-            <input type="range" id="sens" min="1" max="10" value="5">
+            <input type="range" id="sens" min="1" max="10" value="10">
           </div>
         </div>
       </details>
@@ -781,10 +785,12 @@ function resetResults(){results=null;trace=[]}
 async function startSession(){
   if(!song||session) return;
   if(tunerOn) stopTuner();
-  ensureAudio();await actx.resume();
+  ensureAudio();
+  const resumeSoon=()=>Promise.race([actx.resume().catch(()=>{}),new Promise(r=>setTimeout(r,400))]);
+  await resumeSoon();
   const practice=mode!=="listen";
   let m=null;
-  if(practice){m=await openMic(mode==="guide");if(!m)return}
+  if(practice){m=await openMic(mode==="guide");if(!m)return;await resumeSoon()}
   resetResults();$("#result").classList.add("hidden");
   const r=rate(),spb=60/(bpm()*r);
   const startBeat=measureStart(+$("#from").value||1);
@@ -822,15 +828,32 @@ function noteAt(beat){
 function loop(){
   if(!session) return;
   const S=session,now=actx.currentTime,beat=(now-S.t0)/S.spb;
+  // watchdog: iPhone can pause the audio clock; restart it instead of hanging
+  const wall=performance.now();
+  if(now===S.lastNow){
+    if(!S.stallAt) S.stallAt=wall;
+    else if(wall-S.stallAt>500){
+      try{const p=actx.resume();if(p&&p.catch)p.catch(()=>{})}catch(e){}
+      if(unlockEl){try{const p=unlockEl.play();if(p&&p.catch)p.catch(()=>{})}catch(e){}}
+      S.stallAt=wall;S.stalls=(S.stalls||0)+1;
+      if(S.stalls===4) toast("音声が止まっています。画面をタップすると再開することがあります。直らなければ「止める」を押してもう一度再生してください。");
+    }
+  }else{S.stallAt=0}
+  S.lastNow=now;
   // countdown
   const cnt=$("#count");
   if(beat<S.startBeat){
-    const i=Math.floor((now-S.tCount)/S.cs);
+    const pos=(now-S.tCount)/S.cs;
+    const i=Math.floor(pos);
     const n=i<0?3:3-i;
-    if(n!==S.lastCount&&n>=1){cnt.textContent=n;cnt.classList.remove("hidden","pop");void cnt.offsetWidth;cnt.classList.add("pop");S.lastCount=n}
-    lightBeat(null);
+    if(n!==S.lastCount&&n>=1){$("#cnum").textContent=n;cnt.classList.remove("hidden","pop");void cnt.offsetWidth;cnt.classList.add("pop");S.lastCount=n}
+    const frac=i<0?0:clamp(pos-i,0,1);
+    $("#cring").style.strokeDashoffset=(276.46*(1-frac)).toFixed(1);
+    const dots=$("#beats").children;
+    for(const d of dots)d.classList.remove("on");
+    if(i>=0&&frac<0.35&&dots.length)dots[i%dots.length].classList.add("on");
   }else{
-    if(!cnt.classList.contains("hidden")){cnt.textContent="";cnt.classList.add("hidden")}
+    if(!cnt.classList.contains("hidden"))cnt.classList.add("hidden");
     lightBeat(beat);
   }
   // pitch
@@ -872,6 +895,7 @@ function stopSession(silent,finished){
   if(!session) return;
   cancelAnimationFrame(session.raf);
   silenceAll();closeMic(session.mic);
+  $("#cnum").textContent="";$("#cring").style.strokeDashoffset="276.46";
   if(unlockEl&&!tunerOn){try{unlockEl.pause()}catch(e){}}
   const was=session;session=null;
   $("#count").classList.add("hidden");lightBeat(null);
@@ -1004,6 +1028,7 @@ const endDrag=e=>{if(!drag)return;drag=null;cv.style.cursor="";const m=measureOf
 cv.addEventListener("pointerup",endDrag);cv.addEventListener("pointercancel",endDrag);
 
 drawDial();
+document.addEventListener("pointerdown",()=>{if(actx&&actx.state!=="running"){try{const p=actx.resume();if(p&&p.catch)p.catch(()=>{})}catch(e){}}});
 (function autoOpen(){let raw=null;try{raw=localStorage.getItem("scoretuner:last")}catch(e){}if(!raw)return;try{currentRaw=raw;showSong(buildSong(JSON.parse(raw)),null)}catch(e){}})();
 document.addEventListener("visibilitychange",()=>{if(document.hidden&&session)stopSession(true)});
 })();
